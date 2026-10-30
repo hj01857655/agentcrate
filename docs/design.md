@@ -23,6 +23,7 @@ agentcrate/
 │   ├── gateway/            # 接入层：认证、多租户、限流熔断
 │   ├── registry/           # MCP server 注册与工具目录、scope 声明
 │   ├── authz/              # 调用级权限校验（scope + 租户策略）
+│   ├── audit/              # 授权决策审计（JSONL，allow/deny 都记）
 │   ├── router/             # 工具路由：本地直调 or 投递沙箱
 │   ├── sandbox/            # 容器执行器（Docker / 独立进程双后端）
 │   ├── observe/            # OTel spans/metrics 导出
@@ -85,6 +86,25 @@ type Ledger interface {
 - **审计不可绕过**：所有 allow/deny 落审计日志（结构化 JSON，含 runId/traceId/租户），这是给「Agent 治理」场景的第一交付物。
 - **沙箱边界**：容器无宿主挂载、egress 白名单（按 scope 展开）、cpu/mem/pid 限额、限时强杀。
 - **信任链明确**：网关信任 agent 的身份，不信任工具的内容——所以执行必须隔离、输出视为不可信数据。
+
+### M2 实现基线（已落地）
+
+策略文件由 `-policy` 指定（缺省用内置默认策略）：
+
+```yaml
+tenants:
+  default:
+    scopes: ["fs:read", "net:egress"]
+tool_scopes:
+  read_file: ["fs:read"]
+  write_file: ["fs:write"]
+  fetch: ["net:egress"]
+```
+
+- **决策规则**：工具未声明 scope → deny；租户与工具 scope 交集为空 → deny（reason 列出缺失 scope）；否则 allow。工具名取网关对外暴露名，租户身份 M2 阶段固定为 `default`（身份认证属后续里程碑）。
+- **审计**：`-audit` 指定 JSONL 路径（默认 `audit.jsonl`），每条含 `ts/traceId/tenant/tool/downstream/decision/reason`；allow 与 deny 都记，写盘失败只记日志、不阻断调用。
+- **deny 的可观测性**：`authorize` span 带 `agentcrate.decision` / `agentcrate.reason` 属性；`agentcrate_calls_total` 增加 `outcome="denied"` 桶；MCP 侧以 `IsError=true` 的工具结果返回，agent 能读到拒绝原因。
+- **升级路径**：scope 声明目前在策略文件里；后续可从 MCP server 注册声明（registry 的 `Tool.Scopes`）自动推导，策略只保留租户侧授权。
 
 ## 6. 可观测设计
 

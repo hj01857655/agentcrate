@@ -1,4 +1,4 @@
-// AgentCrate M1 入口：单进程 = MCP 网关 + registry + 观测面。
+// AgentCrate 入口：单进程 = MCP 网关 + registry + 授权/审计 + 观测面。
 // /mcp 与 /metrics 共用一个 HTTP mux（docs/design.md 第 2 节的 gateway/observe 模块）。
 package main
 
@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/hj01857655/agentcrate/internal/audit"
+	"github.com/hj01857655/agentcrate/internal/authz"
 	"github.com/hj01857655/agentcrate/internal/gateway"
 	"github.com/hj01857655/agentcrate/internal/observe"
 	"github.com/hj01857655/agentcrate/internal/registry"
@@ -23,6 +25,8 @@ func main() {
 		addr   = flag.String("addr", ":8080", "HTTP 监听地址，/mcp 与 /metrics 共用")
 		otlp   = flag.String("otlp", "localhost:4318", "OTLP/HTTP trace 上报端点（Jaeger all-in-one 默认 4318；4317 是 OTLP/gRPC）")
 		fsRoot = flag.String("fs-root", "workspace", "filesystem 下游暴露给 agent 的根目录")
+		policy = flag.String("policy", "", "授权策略 yaml 路径；空=内置默认策略（default 租户仅 fs:read+net:egress）")
+	auditPath = flag.String("audit", "audit.jsonl", "JSONL 审计日志路径，allow/deny 都记")
 	)
 	flag.Parse()
 
@@ -33,6 +37,17 @@ func main() {
 	if err != nil {
 		log.Fatalf("observe init: %v", err)
 	}
+
+	// 授权器与审计器：策略默认 deny，审计不可绕过。
+	az, err := authz.LoadOrDefault(*policy)
+	if err != nil {
+		log.Fatalf("policy: %v", err)
+	}
+	au, err := audit.New(*auditPath)
+	if err != nil {
+		log.Fatalf("audit: %v", err)
+	}
+	defer au.Close()
 
 	// 下游清单：M1 固定 filesystem + fetch；M2 起改为配置文件/注册 API。
 	root, err := absDefault(*fsRoot)
@@ -48,7 +63,7 @@ func main() {
 	}
 	defer reg.Close()
 
-	gw := gateway.New(reg, obs)
+	gw := gateway.New(reg, obs, az, au)
 
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", mcp.NewStreamableHTTPHandler(
@@ -57,7 +72,8 @@ func main() {
 
 	httpSrv := &http.Server{Addr: *addr, Handler: mux}
 	go func() {
-		log.Printf("agentcrate: mcp=/mcp metrics=/metrics addr=%s otlp=%s fs-root=%s", *addr, *otlp, root)
+		log.Printf("agentcrate: mcp=/mcp metrics=/metrics addr=%s otlp=%s fs-root=%s policy=%s audit=%s",
+			*addr, *otlp, root, az.Summary(), *auditPath)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("http: %v", err)
 		}

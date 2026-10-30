@@ -20,7 +20,7 @@ Agent 从 demo 走向生产，缺的不是又一个编排框架，而是基建�
 | 模块 | 说明 |
 |---|---|
 | **沙箱运行时** | 容器级隔离执行 agent 生成代码与不可信工具，资源限额 + 网络策略，核心差异化模块 |
-| **MCP 接入网关** | 统一接入/注册多个 MCP server，作为执行层的输入面；每次调用按声明 scope 校验，全程审计 |
+| **MCP 接入网关** | 统一接入/注册多个 MCP server，作为执行层的输入面；每次调用按声明 scope 校验，全程审计（M2 起生效：声明制 scope 授权 + 默认拒绝 + JSONL 审计） |
 | **全链路追踪** | OpenTelemetry spans：`authorize → route → sandbox.exec`，成功率 / P99 开箱即得 |
 | **成本台账** | 按 provider / model 单价精确记账，多租户配额与预警 |
 | **评估钩子** | 录制真实调用，回放做工具链回归评测 |
@@ -61,10 +61,11 @@ Agent 从 demo 走向生产，缺的不是又一个编排框架，而是基建�
    .\agentcrate.exe
    ```
 
-   默认参数为 `-addr :8080 -otlp localhost:4318 -fs-root workspace`（fs-root 会被转成绝对路径后传给下游 filesystem server）。
+   默认参数为 `-addr :8080 -otlp localhost:4318 -fs-root workspace -policy "" -audit audit.jsonl`（fs-root 会被转成绝对路径后传给下游 filesystem server；`-policy` 为空时用内置策略——default 租户只有 `fs:read` 与 `net:egress`，写操作默认被拒；`-policy` 指向 yaml 可自定义租户与工具 scope）。
 4. **接入 MCP 客户端**：入口是 Streamable HTTP `http://localhost:8080/mcp`，Claude Code 等客户端用 `type: http` 的 `mcpServers` 配置接入。
-5. **看指标**：`curl http://localhost:8080/metrics`。实际导出指标名带命名空间前缀：`agentcrate_calls_total{tool,tenant,outcome}` 与 `agentcrate_call_duration_seconds{tool,tenant}`（对应 design 里的 `calls_total` / `call_duration_seconds`，加了 `agentcrate_` 前缀）。首次调用前 `/metrics` 只有 HELP/TYPE 行，属正常。
-6. **反查 trace**：每次工具调用的结果 `_meta` 里带 `agentcrate.dev/traceid`，拿它去 Jaeger 按 Trace ID 查全链路（span 树 `agentcrate.call` → `authorize` / `route` / `exec`）。
+5. **看指标**：`curl http://localhost:8080/metrics`。实际导出指标名带命名空间前缀：`agentcrate_calls_total{tool,tenant,outcome}` 与 `agentcrate_call_duration_seconds{tool,tenant}`（对应 design 里的 `calls_total` / `call_duration_seconds`，加了 `agentcrate_` 前缀）；被授权策略拒绝的调用进 `outcome="denied"` 桶。首次调用前 `/metrics` 只有 HELP/TYPE 行，属正常。
+6. **看审计**：`-audit` 指定的 JSONL 文件（默认 `audit.jsonl`）每条一行，allow 与 deny 都记，含 `ts/traceId/tenant/tool/downstream/decision/reason`；deny 记录里 reason 直接说明缺哪个 scope。
+7. **反查 trace**：每次工具调用的结果 `_meta` 里带 `agentcrate.dev/traceid`，拿它去 Jaeger 按 Trace ID 查全链路（span 树 `agentcrate.call` → `authorize` / `route` / `exec`）。
 
 里程碑与验收标准见 [docs/roadmap.md](docs/roadmap.md)。
 
