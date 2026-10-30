@@ -58,8 +58,9 @@ func LoadOrDefault(path string) (*Authorizer, error) {
 	return Load(path)
 }
 
-// DefaultPolicy 内置策略：读类工具给 fs:read，写类给 fs:write，fetch 给 net:egress；
-// default 租户只有读和出网——写操作默认被拒，正好演示「默认 deny + 审计可查」。
+// DefaultPolicy 内置策略：读类工具给 fs:read，写类给 fs:write，fetch 给 net:egress，
+// 沙箱执行器给 sandbox:exec；default 租户持有读/出网/沙箱执行——写操作默认被拒，
+// 正好演示「默认 deny + 审计可查」。
 func DefaultPolicy() Policy {
 	readTools := []string{
 		"read_file", "read_multiple_files", "list_directory", "directory_tree",
@@ -76,9 +77,10 @@ func DefaultPolicy() Policy {
 		tools[t] = []string{"fs:write"}
 	}
 	tools["fetch"] = []string{"net:egress"}
+	tools["sandbox_exec"] = []string{"sandbox:exec"}
 	return Policy{
 		Tenants: map[string]Tenant{
-			"default": {Scopes: []string{"fs:read", "net:egress"}},
+			"default": {Scopes: []string{"fs:read", "net:egress", "sandbox:exec"}},
 		},
 		ToolScopes: tools,
 	}

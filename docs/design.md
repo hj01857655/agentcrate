@@ -106,6 +106,14 @@ tool_scopes:
 - **deny 的可观测性**：`authorize` span 带 `agentcrate.decision` / `agentcrate.reason` 属性；`agentcrate_calls_total` 增加 `outcome="denied"` 桶；MCP 侧以 `IsError=true` 的工具结果返回，agent 能读到拒绝原因。
 - **升级路径**：scope 声明目前在策略文件里；后续可从 MCP server 注册声明（registry 的 `Tool.Scopes`）自动推导，策略只保留租户侧授权。
 
+### M3 实现基线（已落地：进程后端）
+
+- **入口**：内置工具 `sandbox_exec`，参数 `argv`（命令数组）+ `timeout_seconds`；默认策略给它 `sandbox:exec` scope，走同一套 authorize → 审计 → 指标链路。
+- **隔离手段**（进程后端 `internal/sandbox`）：每次执行建独立临时工作目录并在结束后删除；宿主机环境变量只透白名单（PATH/TEMP/HOME 等，密钥类一律不继承）；超时连整棵进程树一起杀（Windows `taskkill /T /F`），并用 `WaitDelay` 兜底防止孙进程占管道导致 `Wait` 挂死；stdout/stderr 各自限额 256 KiB，超限截断并标记。
+- **非零退出码不算错误**：`ExitCode` 作为业务结果返回；只有启动失败/超时/等待异常才是后端错误（映射为 `IsError=true` 的工具结果）。
+- **已知边界**：进程后端不提供文件系统与网络隔离，只解决「资源失控、环境泄露、僵尸进程」三类问题；真正的容器级隔离需 Docker/gVisor 后端，接口已按 `sandbox.Backend` 预留，等有 Docker 的环境再补。
+- **测试基线**：`internal/sandbox/process_test.go` 覆盖成功/非零退出/超时杀树/环境白名单/输出截断/工作目录清理/空 argv；`TestSandboxExec` 验证 MCP 端到端与超时路径。
+
 ## 6. 可观测设计
 
 - Span 树：`agentcrate.call` → `authorize` / `route` / `sandbox.pull` / `sandbox.exec` / `ledger.record`

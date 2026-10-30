@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/hj01857655/agentcrate/internal/gateway"
 	"github.com/hj01857655/agentcrate/internal/observe"
 	"github.com/hj01857655/agentcrate/internal/registry"
+	"github.com/hj01857655/agentcrate/internal/sandbox"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -58,7 +60,7 @@ func TestEndToEnd(t *testing.T) {
 	}
 	defer reg.Close()
 
-	gw := gateway.New(reg, obs, authz.New(authz.DefaultPolicy()), mustAudit(t))
+	gw := gateway.New(reg, obs, authz.New(authz.DefaultPolicy()), mustAudit(t), sandbox.NewProcessBackend(t.TempDir()))
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return gw.Server() }, nil))
@@ -190,7 +192,7 @@ tool_scopes:
 	}
 	defer reg.Close()
 
-	gw := gateway.New(reg, obs, az, au)
+	gw := gateway.New(reg, obs, az, au, sandbox.NewProcessBackend(t.TempDir()))
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return gw.Server() }, nil))
@@ -296,6 +298,92 @@ func readAudit(t *testing.T, path string) []audit.Entry {
 		out = append(out, e)
 	}
 	return out
+}
+
+// TestSandboxExec 验证内置 sandbox_exec 工具的端到端行为：正常执行、超时中断、
+// 输出里带 traceId；不依赖 npx/uvx 下游，因此总是运行。
+func TestSandboxExec(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("以 cmd 构造命令，仅 Windows 运行")
+	}
+	ctx := context.Background()
+	obs, shutdown, err := observe.Init(ctx, envOr("AGENTCRATE_OTLP", "localhost:4318"))
+	if err != nil {
+		t.Fatalf("observe init: %v", err)
+	}
+	defer func() { _ = shutdown(context.Background()) }()
+
+	// 沙箱执行不需要下游 MCP server，空 registry 即可。
+	reg, err := registry.New(ctx, nil)
+	if err != nil {
+		t.Fatalf("registry init: %v", err)
+	}
+	defer reg.Close()
+
+	gw := gateway.New(reg, obs, authz.New(authz.DefaultPolicy()), mustAudit(t),
+		sandbox.NewProcessBackend(t.TempDir()))
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", mcp.NewStreamableHTTPHandler(
+		func(*http.Request) *mcp.Server { return gw.Server() }, nil))
+	mux.Handle("/metrics", obs.Handler())
+	hs := httptest.NewServer(mux)
+	defer hs.Close()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "agentcrate-sandbox", Version: "0.0.1"}, nil)
+	cs, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: hs.URL + "/mcp"}, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer cs.Close()
+
+	// tools/list 应包含内置 sandbox_exec。
+	lr, err := cs.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	seen := false
+	for _, tl := range lr.Tools {
+		if tl.Name == "sandbox_exec" {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Fatal("tools/list 缺 sandbox_exec")
+	}
+
+	ok, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "sandbox_exec",
+		Arguments: map[string]any{"argv": []string{"cmd", "/c", "echo sandbox-ok"}, "timeout_seconds": 10},
+	})
+	if err != nil {
+		t.Fatalf("call sandbox_exec: %v", err)
+	}
+	if ok.IsError {
+		t.Fatalf("sandbox_exec 应成功，得到 IsError: %+v", ok.Content)
+	}
+	blob, _ := json.Marshal(ok.Content)
+	if !strings.Contains(string(blob), "sandbox-ok") || !strings.Contains(string(blob), "exit=0") {
+		t.Errorf("输出不含预期内容: %s", blob)
+	}
+	if traceID, _ := ok.Meta[gateway.TraceIdKey].(string); traceID == "" {
+		t.Errorf("sandbox_exec 结果缺 traceId")
+	}
+
+	// 超时路径：1 秒超时 + 5 秒命令 → IsError 且提示 timeout。
+	tmo, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "sandbox_exec",
+		Arguments: map[string]any{"argv": []string{"cmd", "/c", "ping -n 6 127.0.0.1"}, "timeout_seconds": 1},
+	})
+	if err != nil {
+		t.Fatalf("call sandbox_exec (timeout case): %v", err)
+	}
+	if !tmo.IsError {
+		t.Errorf("超时用例应 IsError=true")
+	}
+	tmoBlob, _ := json.Marshal(tmo.Content)
+	if !strings.Contains(string(tmoBlob), "timeout") {
+		t.Errorf("超时提示缺失: %s", tmoBlob)
+	}
 }
 
 func keysOf(m map[string]bool) []string {

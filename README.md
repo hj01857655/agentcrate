@@ -19,7 +19,7 @@ Agent 从 demo 走向生产，缺的不是又一个编排框架，而是基建�
 
 | 模块 | 说明 |
 |---|---|
-| **沙箱运行时** | 容器级隔离执行 agent 生成代码与不可信工具，资源限额 + 网络策略，核心差异化模块 |
+| **沙箱运行时** | 隔离执行 agent 生成代码与不可信工具，资源限额 + 环境隔离，核心差异化模块。M3 已落地进程后端：独立临时工作目录、环境变量白名单、超时杀整棵进程树、输出限额截断；容器/gVisor 后端待 Docker 环境 |
 | **MCP 接入网关** | 统一接入/注册多个 MCP server，作为执行层的输入面；每次调用按声明 scope 校验，全程审计（M2 起生效：声明制 scope 授权 + 默认拒绝 + JSONL 审计） |
 | **全链路追踪** | OpenTelemetry spans：`authorize → route → sandbox.exec`，成功率 / P99 开箱即得 |
 | **成本台账** | 按 provider / model 单价精确记账，多租户配额与预警 |
@@ -61,11 +61,14 @@ Agent 从 demo 走向生产，缺的不是又一个编排框架，而是基建�
    .\agentcrate.exe
    ```
 
-   默认参数为 `-addr :8080 -otlp localhost:4318 -fs-root workspace -policy "" -audit audit.jsonl`（fs-root 会被转成绝对路径后传给下游 filesystem server；`-policy` 为空时用内置策略——default 租户只有 `fs:read` 与 `net:egress`，写操作默认被拒；`-policy` 指向 yaml 可自定义租户与工具 scope）。
+   默认参数为 `-addr :8080 -otlp localhost:4318 -fs-root workspace -policy "" -audit audit.jsonl -sandbox-dir ""`（fs-root 会被转成绝对路径后传给下游 filesystem server；`-policy` 为空时用内置策略——default 租户持有 `fs:read`、`net:egress`、`sandbox:exec`，写操作默认被拒；`-sandbox-dir` 为空时用系统临时目录）。
 4. **接入 MCP 客户端**：入口是 Streamable HTTP `http://localhost:8080/mcp`，Claude Code 等客户端用 `type: http` 的 `mcpServers` 配置接入。
 5. **看指标**：`curl http://localhost:8080/metrics`。实际导出指标名带命名空间前缀：`agentcrate_calls_total{tool,tenant,outcome}` 与 `agentcrate_call_duration_seconds{tool,tenant}`（对应 design 里的 `calls_total` / `call_duration_seconds`，加了 `agentcrate_` 前缀）；被授权策略拒绝的调用进 `outcome="denied"` 桶。首次调用前 `/metrics` 只有 HELP/TYPE 行，属正常。
 6. **看审计**：`-audit` 指定的 JSONL 文件（默认 `audit.jsonl`）每条一行，allow 与 deny 都记，含 `ts/traceId/tenant/tool/downstream/decision/reason`；deny 记录里 reason 直接说明缺哪个 scope。
-7. **反查 trace**：每次工具调用的结果 `_meta` 里带 `agentcrate.dev/traceid`，拿它去 Jaeger 按 Trace ID 查全链路（span 树 `agentcrate.call` → `authorize` / `route` / `exec`）。
+7. **反查 trace**：每次工具调用的结果 `_meta` 里带 `agentcrate.dev/traceid`，拿它去 Jaeger 按 Trace ID 查全链路（span 树 `agentcrate.call` → `authorize` / `route` / `exec`，沙箱工具为 `authorize` / `sandbox.exec`）。
+8. **沙箱执行**：客户端可调用内置工具 `sandbox_exec`（参数 `argv` 命令数组、`timeout_seconds` 超时秒数），在隔离的临时工作目录里执行并返回 stdout/stderr/退出码；需要 `sandbox:exec` scope（内置策略默认授予 default 租户），走同一套授权、审计与 trace。
+
+8. **沙箱执行**：客户端可调用内置工具 `sandbox_exec`（参数 `argv` 命令数组、`timeout_seconds` 超时秒数），在隔离的临时工作目录中执行并返回 stdout/stderr/退出码；需要 `sandbox:exec` scope（内置策略已授予 default 租户），走同一套授权、审计与 trace（span 树为 `authorize` / `sandbox.exec`）。
 
 里程碑与验收标准见 [docs/roadmap.md](docs/roadmap.md)。
 

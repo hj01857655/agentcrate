@@ -17,6 +17,7 @@ import (
 	"github.com/hj01857655/agentcrate/internal/gateway"
 	"github.com/hj01857655/agentcrate/internal/observe"
 	"github.com/hj01857655/agentcrate/internal/registry"
+	"github.com/hj01857655/agentcrate/internal/sandbox"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -27,6 +28,7 @@ func main() {
 		fsRoot = flag.String("fs-root", "workspace", "filesystem 下游暴露给 agent 的根目录")
 		policy = flag.String("policy", "", "授权策略 yaml 路径；空=内置默认策略（default 租户仅 fs:read+net:egress）")
 	auditPath = flag.String("audit", "audit.jsonl", "JSONL 审计日志路径，allow/deny 都记")
+	sandboxDir = flag.String("sandbox-dir", "", "沙箱工作目录基底；空=系统临时目录，每次执行建子目录并执行完删除")
 	)
 	flag.Parse()
 
@@ -49,6 +51,9 @@ func main() {
 	}
 	defer au.Close()
 
+	// 沙箱后端：M3 先上进程后端（独立临时目录 + 环境白名单 + 超时杀树 + 输出限额）。
+	sb := sandbox.NewProcessBackend(*sandboxDir)
+
 	// 下游清单：M1 固定 filesystem + fetch；M2 起改为配置文件/注册 API。
 	root, err := absDefault(*fsRoot)
 	if err != nil {
@@ -63,7 +68,7 @@ func main() {
 	}
 	defer reg.Close()
 
-	gw := gateway.New(reg, obs, az, au)
+	gw := gateway.New(reg, obs, az, au, sb)
 
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", mcp.NewStreamableHTTPHandler(
