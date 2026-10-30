@@ -1,0 +1,81 @@
+// AgentCrate M1 入口：单进程 = MCP 网关 + registry + 观测面。
+// /mcp 与 /metrics 共用一个 HTTP mux（docs/design.md 第 2 节的 gateway/observe 模块）。
+package main
+
+import (
+	"context"
+	"flag"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"time"
+
+	"github.com/hj01857655/agentcrate/internal/gateway"
+	"github.com/hj01857655/agentcrate/internal/observe"
+	"github.com/hj01857655/agentcrate/internal/registry"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+func main() {
+	var (
+		addr   = flag.String("addr", ":8080", "HTTP 监听地址，/mcp 与 /metrics 共用")
+		otlp   = flag.String("otlp", "localhost:4318", "OTLP/HTTP trace 上报端点（Jaeger all-in-one 默认 4318；4317 是 OTLP/gRPC）")
+		fsRoot = flag.String("fs-root", "workspace", "filesystem 下游暴露给 agent 的根目录")
+	)
+	flag.Parse()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	obs, shutdown, err := observe.Init(ctx, *otlp)
+	if err != nil {
+		log.Fatalf("observe init: %v", err)
+	}
+
+	// 下游清单：M1 固定 filesystem + fetch；M2 起改为配置文件/注册 API。
+	root, err := absDefault(*fsRoot)
+	if err != nil {
+		log.Fatalf("fs-root: %v", err)
+	}
+	reg, err := registry.New(ctx, []registry.Spec{
+		{ID: "filesystem", Exe: "cmd", Args: []string{"/c", "npx", "-y", "@modelcontextprotocol/server-filesystem", root}},
+		{ID: "fetch", Exe: "cmd", Args: []string{"/c", "uvx", "mcp-server-fetch"}},
+	})
+	if err != nil {
+		log.Fatalf("registry: %v", err)
+	}
+	defer reg.Close()
+
+	gw := gateway.New(reg, obs)
+
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", mcp.NewStreamableHTTPHandler(
+		func(*http.Request) *mcp.Server { return gw.Server() }, nil))
+	mux.Handle("/metrics", obs.Handler())
+
+	httpSrv := &http.Server{Addr: *addr, Handler: mux}
+	go func() {
+		log.Printf("agentcrate: mcp=/mcp metrics=/metrics addr=%s otlp=%s fs-root=%s", *addr, *otlp, root)
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("http: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = httpSrv.Shutdown(shutdownCtx)
+	if err := shutdown(shutdownCtx); err != nil {
+		log.Printf("trace shutdown: %v", err)
+	}
+}
+
+// absDefault 把相对的 fs-root 定成绝对路径，下游 server 的报错信息才可读。
+func absDefault(p string) (string, error) {
+	if p == "" {
+		p = "workspace"
+	}
+	return filepath.Abs(p)
+}

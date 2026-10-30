@@ -1,0 +1,13 @@
+# binaries
+bin/
+*.exe
+*.test
+*.out
+
+# go
+vendor/
+
+# env & local state
+.env
+*.local.yaml
+data/
