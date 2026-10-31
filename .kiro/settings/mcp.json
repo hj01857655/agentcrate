@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "agentcrate": {
+      "url": "http://localhost:8080/mcp",
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}
