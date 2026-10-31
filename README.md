@@ -48,10 +48,10 @@ Agent 从 demo 走向生产，缺的不是又一个编排框架，而是基建�
 ## 本地运行
 
 1. **构建**：在仓库根执行 `go build ./cmd/agentcrate`。
-2. **启动 trace 后端（Jaeger 原生 Windows 二进制，本机不装 Docker）**：
+2. **启动 trace 后端（Jaeger 原生 Windows 二进制，本机不装 Docker）**：从 [Jaeger releases](https://github.com/jaegertracing/jaeger/releases) 下载 Windows 二进制（v2.22.0 验证通过），放到任意目录后运行，例如：
 
    ```
-   E:\VSCodeSpace\Agent\.tools\jaeger-2.22.0-windows-amd64\jaeger.exe
+   ..\..\.tools\jaeger-2.22.0-windows-amd64\jaeger.exe
    ```
 
    Jaeger UI 在 http://localhost:16686；OTLP/HTTP 收 4318、OTLP/gRPC 收 4317（网关默认走 4318）。
