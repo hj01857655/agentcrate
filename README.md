@@ -66,8 +66,6 @@ Agent 从 demo 走向生产，缺的不是又一个编排框架，而是基建�
 5. **看指标**：`curl http://localhost:8080/metrics`。实际导出指标名带命名空间前缀：`agentcrate_calls_total{tool,tenant,outcome}` 与 `agentcrate_call_duration_seconds{tool,tenant}`（对应 design 里的 `calls_total` / `call_duration_seconds`，加了 `agentcrate_` 前缀）；被授权策略拒绝的调用进 `outcome="denied"` 桶。首次调用前 `/metrics` 只有 HELP/TYPE 行，属正常。
 6. **看审计**：`-audit` 指定的 JSONL 文件（默认 `audit.jsonl`）每条一行，allow 与 deny 都记，含 `ts/traceId/tenant/tool/downstream/decision/reason`；deny 记录里 reason 直接说明缺哪个 scope。
 7. **反查 trace**：每次工具调用的结果 `_meta` 里带 `agentcrate.dev/traceid`，拿它去 Jaeger 按 Trace ID 查全链路（span 树 `agentcrate.call` → `authorize` / `route` / `exec`，沙箱工具为 `authorize` / `sandbox.exec`）。
-8. **沙箱执行**：客户端可调用内置工具 `sandbox_exec`（参数 `argv` 命令数组、`timeout_seconds` 超时秒数），在隔离的临时工作目录里执行并返回 stdout/stderr/退出码；需要 `sandbox:exec` scope（内置策略默认授予 default 租户），走同一套授权、审计与 trace。
-
 8. **沙箱执行**：客户端可调用内置工具 `sandbox_exec`（参数 `argv` 命令数组、`timeout_seconds` 超时秒数），在隔离的临时工作目录中执行并返回 stdout/stderr/退出码；需要 `sandbox:exec` scope（内置策略已授予 default 租户），走同一套授权、审计与 trace（span 树为 `authorize` / `sandbox.exec`）。
 
 里程碑与验收标准见 [docs/roadmap.md](docs/roadmap.md)。
